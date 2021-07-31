@@ -9,6 +9,7 @@ import io.vertx.ext.auth.jwt.JWTAuthOptions;
 import io.vertx.ext.mongo.MongoClient;
 import io.vertx.ext.web.Route;
 import io.vertx.ext.web.Router;
+import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import org.springframework.security.crypto.bcrypt.BCrypt;
 
@@ -45,24 +46,62 @@ public class MainVerticle extends AbstractVerticle {
   }
 
   private boolean validateItemData(JsonObject item){
-    if(item.getString("title") == null || item.getString("title").equals("")){
-      return false;
-    }
-    return true;
+    return item.getString("title") != null && !item.getString("title").equals("");
   }
 
-  @Override
-  public void start() throws Exception {
-    Router router = Router.router(vertx);
-    router.route().handler(BodyHandler.create());
-    MongoClient client = MongoClient.create(vertx, new JsonObject().put("db_name", DATABASE_NAME));
+  private JsonObject validateJsonBody(RoutingContext context){
+    JsonObject newObject = new JsonObject();
+    try{
+      newObject = context.getBodyAsJson();
+    } catch (Exception e){
+      System.out.println("Body json Error.");
+    }
+    return newObject;
+  }
 
-    JWTAuth provider = JWTAuth.create(vertx, new JWTAuthOptions()
-      .addPubSecKey(new PubSecKeyOptions()
-        .setAlgorithm("HS256")
-        .setBuffer("keyboard cat")));
+  private void unauthorizedAccess(RoutingContext context){
+    System.out.println("Unauthorized access.");
+    context.response().setStatusCode(401);
+    context.json(new JsonObject());
+  }
 
-    Route postLogin = router
+  private void postRegister(Router router, MongoClient client){
+    router
+      .post("/register")
+      .handler(context -> {
+        JsonObject user = validateJsonBody(context);
+        if(validateUserData(user)){
+          JsonObject userLogin = new JsonObject().put("login", user.getString("login"));
+          client.findOne("users", userLogin, new JsonObject(), findUserResult ->{
+            if (findUserResult.succeeded()) {
+              if(findUserResult.result() == null){
+                String encryptedPassword = encryptPassword(user.getString("password"));
+                user.put("password", encryptedPassword);
+                client.save("users", user, saveUserResult -> {
+                  if (saveUserResult.succeeded()) {
+                    String id = saveUserResult.result();
+                    System.out.println("Saved user with id " + id);
+                  } else {
+                    saveUserResult.cause().printStackTrace();
+                  }
+                });
+              }else {
+                System.out.println("User "+ user.getString("login")+" already in database.");
+              }
+            } else {
+              findUserResult.cause().printStackTrace();
+            }
+          });
+        }else{
+          System.out.println("User validation error.");
+        }
+        context.response().setStatusCode(204);
+        context.json(new JsonObject());
+      });
+  }
+
+  private void postLogin(Router router, MongoClient client, JWTAuth provider){
+    router
       .post("/login")
       .handler(context -> {
         JsonObject user = context.getBodyAsJson();
@@ -82,95 +121,57 @@ public class MainVerticle extends AbstractVerticle {
           context.json(token);
         });
       });
+  }
 
-    Route postRegister = router
-      .post("/register")
+  private void postItem(Router router, MongoClient client, JWTAuth provider){
+    router
+      .post("/items")
       .handler(context -> {
-        JsonObject bodyJson = new JsonObject();
+        MultiMap headers = context.request().headers();
+        String token = headers.contains("Authorization") ? headers.get("Authorization") : "";
         try{
-          bodyJson = context.getBodyAsJson();
-        } catch (Exception e){
-          System.out.println("Body json Error.");
+          token = token.split(" ")[1];
+        }catch (Exception e){
+          System.out.println("Token error.");
         }
-
-        JsonObject user = bodyJson;
-
-        if(validateUserData(user)){
-          JsonObject userLogin = new JsonObject().put("login", user.getString("login"));
-          client.findOne("users", userLogin, new JsonObject(), res ->{
-            if (res.succeeded()) {
-              JsonObject userFromDB = res.result();
-              if(userFromDB == null){
-                String hashedPassword = encryptPassword(user.getString("password"));
-                user.put("password", hashedPassword);
-                client.save("users", user, result -> {
-                  if (result.succeeded()) {
-                    String id = result.result();
-                    System.out.println("Saved user with id " + id);
-                  } else {
-                    result.cause().printStackTrace();
-                  }
-                });
-              }else {
-                System.out.println("User "+user.getString("login")+" already in database.");
+        provider.authenticate(new JsonObject().put("token", token))
+          .onSuccess(user->{
+            JsonObject userId = new JsonObject().put("_id", user.principal().getString("sub"));
+            client.findOne("users", userId, new JsonObject(), res ->{
+              if(res.result() != null){
+                System.out.println("User authenticated.");
+                JsonObject item = context.getBodyAsJson();
+                if(validateItemData(item)){
+                  JsonObject newItem = new JsonObject()
+                    .put("owner", user.principal().getString("sub"))
+                    .put("name", item.getString("title"));
+                  client.save("items", newItem, result -> {
+                    if (result.succeeded()) {
+                      String id = result.result();
+                      System.out.println("Saved item with id " + id);
+                    } else {
+                      result.cause().printStackTrace();
+                    }
+                  });
+                }else{
+                  System.out.println("Data validation error.");
+                }
+              }else{
+                System.out.println("Unauthorized access.");
+                context.response().setStatusCode(401);
               }
-            } else {
-              res.cause().printStackTrace();
-            }
+            });
+          })
+          .onFailure(err->{
+            System.out.println("Unauthorized access.");
+            context.response().setStatusCode(401);
           });
-        }else{
-          System.out.println("User validation error.");
-        }
-        context.response().setStatusCode(204);
         context.json(new JsonObject());
       });
+  }
 
-
-    Route  postItems = router.post("/items").handler(context -> {
-      MultiMap headers = context.request().headers();
-      String token = headers.contains("Authorization") ? headers.get("Authorization") : "";
-      try{
-        token = token.split(" ")[1];
-      }catch (Exception e){
-        System.out.println("Token error.");
-      }
-
-      provider.authenticate(new JsonObject().put("token", token))
-        .onSuccess(user->{
-          JsonObject userId = new JsonObject().put("_id", user.principal().getString("sub"));
-          client.findOne("users", userId, new JsonObject(), res ->{
-            if(res.result() != null){
-              System.out.println("User authenticated.");
-              JsonObject item = context.getBodyAsJson();
-              if(validateItemData(item)){
-                JsonObject newItem = new JsonObject()
-                  .put("owner", user.principal().getString("sub"))
-                  .put("name", item.getString("title"));
-                client.save("items", newItem, result -> {
-                  if (result.succeeded()) {
-                    String id = result.result();
-                    System.out.println("Saved item with id " + id);
-                  } else {
-                    result.cause().printStackTrace();
-                  }
-                });
-              }else{
-                System.out.println("Data validation error.");
-              }
-            }else{
-              System.out.println("Unauthorized access.");
-              context.response().setStatusCode(401);
-            }
-          });
-        })
-        .onFailure(err->{
-          System.out.println("Unauthorized access.");
-          context.response().setStatusCode(401);
-        });
-      context.json(new JsonObject());
-    });
-
-    Route  getItems = router
+  private void getItems(Router router, MongoClient client, JWTAuth provider){
+    router
       .get("/items")
       .handler(context -> {
         MultiMap headers = context.request().headers();
@@ -180,7 +181,6 @@ public class MainVerticle extends AbstractVerticle {
         }catch (Exception e){
           System.out.println("Token error.");
         }
-
         provider.authenticate(new JsonObject().put("token", token))
           .onSuccess(user->{
             JsonObject userId = new JsonObject().put("_id", user.principal().getString("sub"));
@@ -194,23 +194,33 @@ public class MainVerticle extends AbstractVerticle {
                     context.json(itemsList);
                   } else {
                     result.cause().printStackTrace();
-                    context.response().setStatusCode(401);
-                    context.json(new JsonObject());
+                    unauthorizedAccess(context);
                   }
                 });
               }else{
-                System.out.println("Unauthorized access.");
-                context.response().setStatusCode(401);
-                context.json(new JsonObject());
+                unauthorizedAccess(context);
               }
             });
           })
-          .onFailure(err->{
-            System.out.println("Unauthorized access.");
-            context.response().setStatusCode(401);
-            context.json(new JsonObject());
-          });
+          .onFailure(err->unauthorizedAccess(context));
       });
+  }
+
+  @Override
+  public void start() throws Exception {
+    Router router = Router.router(vertx);
+    router.route().handler(BodyHandler.create());
+    MongoClient client = MongoClient.create(vertx, new JsonObject().put("db_name", DATABASE_NAME));
+
+    JWTAuth provider = JWTAuth.create(vertx, new JWTAuthOptions()
+      .addPubSecKey(new PubSecKeyOptions()
+        .setAlgorithm("HS256")
+        .setBuffer("keyboard cat")));
+
+    postLogin(router, client,provider);
+    postRegister(router, client);
+    postItem(router, client, provider);
+    getItems(router, client, provider);
 
     vertx.createHttpServer()
       .requestHandler(router)
