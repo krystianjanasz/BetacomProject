@@ -7,10 +7,10 @@ import io.vertx.ext.auth.PubSecKeyOptions;
 import io.vertx.ext.auth.jwt.JWTAuth;
 import io.vertx.ext.auth.jwt.JWTAuthOptions;
 import io.vertx.ext.mongo.MongoClient;
-import io.vertx.ext.web.Route;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
+import io.vertx.ext.web.handler.JWTAuthHandler;
 import org.springframework.security.crypto.bcrypt.BCrypt;
 
 import java.util.ArrayList;
@@ -20,6 +20,7 @@ import java.util.List;
 public class MainVerticle extends AbstractVerticle {
 
   private final String DATABASE_NAME = "MyDB";
+
 
   private JsonObject authenticateUser(JWTAuth provider, String userId, String password, String encPassword){
     if(BCrypt.checkpw(password, encPassword)){
@@ -59,10 +60,9 @@ public class MainVerticle extends AbstractVerticle {
     return newObject;
   }
 
-  private void unauthorizedAccess(RoutingContext context){
-    System.out.println("Unauthorized access.");
-    context.response().setStatusCode(401);
-    context.json(new JsonObject());
+  private void setResponse(RoutingContext context, JsonObject body, int statusCode){
+    context.response().setStatusCode(statusCode);
+    context.json(body);
   }
 
   private void postRegister(Router router, MongoClient client){
@@ -95,8 +95,7 @@ public class MainVerticle extends AbstractVerticle {
         }else{
           System.out.println("User validation error.");
         }
-        context.response().setStatusCode(204);
-        context.json(new JsonObject());
+        setResponse(context, new JsonObject(), 204);
       });
   }
 
@@ -104,22 +103,27 @@ public class MainVerticle extends AbstractVerticle {
     router
       .post("/login")
       .handler(context -> {
-        JsonObject user = context.getBodyAsJson();
-        JsonObject userLogin = new JsonObject().put("login", user.getString("login"));
-        client.findOne("users", userLogin, new JsonObject(), res ->{
-          JsonObject token = new JsonObject();
-          if (res.succeeded()) {
-            if(res.result() != null){
-              String password = user.getString("password");
-              String encPassword = res.result().getString("password");
-              String userId = res.result().getString("_id");
-              token = authenticateUser(provider, userId, password, encPassword);
+        JsonObject user = validateJsonBody(context);
+        if(validateUserData(user)){
+          JsonObject userLogin = new JsonObject().put("login", user.getString("login"));
+          client.findOne("users", userLogin, new JsonObject(), res ->{
+            JsonObject token = new JsonObject();
+            if (res.succeeded()) {
+              if(res.result() != null){
+                String password = user.getString("password");
+                String encPassword = res.result().getString("password");
+                String userId = res.result().getString("_id");
+                token = authenticateUser(provider, userId, password, encPassword);
+              }
+            } else {
+              res.cause().printStackTrace();
             }
-          } else {
-            res.cause().printStackTrace();
-          }
-          context.json(token);
-        });
+            setResponse(context, token, 200);
+          });
+        }else{
+          System.out.println("User validation error.");
+          setResponse(context, new JsonObject(), 200);
+        }
       });
   }
 
@@ -137,42 +141,44 @@ public class MainVerticle extends AbstractVerticle {
         provider.authenticate(new JsonObject().put("token", token))
           .onSuccess(user->{
             JsonObject userId = new JsonObject().put("_id", user.principal().getString("sub"));
-            client.findOne("users", userId, new JsonObject(), res ->{
-              if(res.result() != null){
+            client.findOne("users", userId, new JsonObject(), findUserResult ->{
+              if(findUserResult.result() != null){
                 System.out.println("User authenticated.");
                 JsonObject item = context.getBodyAsJson();
                 if(validateItemData(item)){
                   JsonObject newItem = new JsonObject()
                     .put("owner", user.principal().getString("sub"))
                     .put("name", item.getString("title"));
-                  client.save("items", newItem, result -> {
-                    if (result.succeeded()) {
-                      String id = result.result();
+                  client.save("items", newItem, itemSaveResult -> {
+                    if (itemSaveResult.succeeded()) {
+                      String id = itemSaveResult.result();
                       System.out.println("Saved item with id " + id);
                     } else {
-                      result.cause().printStackTrace();
+                      itemSaveResult.cause().printStackTrace();
+                      setResponse(context, new JsonObject(), 200);
                     }
                   });
                 }else{
                   System.out.println("Data validation error.");
+                  setResponse(context,new JsonObject(), 200);
                 }
               }else{
                 System.out.println("Unauthorized access.");
-                context.response().setStatusCode(401);
+                setResponse(context, new JsonObject(), 401);
               }
             });
           })
           .onFailure(err->{
             System.out.println("Unauthorized access.");
-            context.response().setStatusCode(401);
+            setResponse(context,new JsonObject(), 401);
           });
-        context.json(new JsonObject());
       });
   }
 
   private void getItems(Router router, MongoClient client, JWTAuth provider){
     router
       .get("/items")
+      .handler(JWTAuthHandler.create(provider))
       .handler(context -> {
         MultiMap headers = context.request().headers();
         String token = headers.contains("Authorization") ? headers.get("Authorization") : "";
@@ -184,25 +190,29 @@ public class MainVerticle extends AbstractVerticle {
         provider.authenticate(new JsonObject().put("token", token))
           .onSuccess(user->{
             JsonObject userId = new JsonObject().put("_id", user.principal().getString("sub"));
-            client.findOne("users", userId, new JsonObject(), res ->{
-              if(res.result() != null){
+            client.findOne("users", userId, new JsonObject(), findUserResult ->{
+              if(findUserResult.result() != null){
                 System.out.println("User authenticated.");
                 JsonObject owner = new JsonObject().put("owner", user.principal().getString("sub"));
-                client.find("items", owner, result->{
-                  if(res.succeeded()){
-                    List<JsonObject> itemsList = new ArrayList<JsonObject>(result.result());
+                client.find("items", owner, findItemsResult->{
+                  if(findItemsResult.succeeded()){
+                    List<JsonObject> itemsList = new ArrayList<JsonObject>(findItemsResult.result());
                     context.json(itemsList);
                   } else {
-                    result.cause().printStackTrace();
-                    unauthorizedAccess(context);
+                    findItemsResult.cause().printStackTrace();
+                    setResponse(context,new JsonObject(), 200);
                   }
                 });
               }else{
-                unauthorizedAccess(context);
+                System.out.println("Unauthorized access.");
+                setResponse(context,new JsonObject(), 401);
               }
             });
           })
-          .onFailure(err->unauthorizedAccess(context));
+          .onFailure(err->{
+            System.out.println("Unauthorized access.");
+            setResponse(context,new JsonObject(), 401);
+          });
       });
   }
 
