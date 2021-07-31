@@ -10,7 +10,6 @@ import io.vertx.ext.mongo.MongoClient;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
-import io.vertx.ext.web.handler.JWTAuthHandler;
 import org.springframework.security.crypto.bcrypt.BCrypt;
 
 import java.util.ArrayList;
@@ -178,7 +177,6 @@ public class MainVerticle extends AbstractVerticle {
   private void getItems(Router router, MongoClient client, JWTAuth provider){
     router
       .get("/items")
-      .handler(JWTAuthHandler.create(provider))
       .handler(context -> {
         MultiMap headers = context.request().headers();
         String token = headers.contains("Authorization") ? headers.get("Authorization") : "";
